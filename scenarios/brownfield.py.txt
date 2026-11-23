@@ -1,0 +1,84 @@
+"""HTTP API and transactional storage for short links."""
+
+import os
+import secrets
+import sqlite3
+import time
+from contextlib import closing
+from pathlib import Path
+
+from fastapi import FastAPI, HTTPException
+from fastapi.responses import RedirectResponse
+from pydantic import BaseModel, HttpUrl
+
+
+class LinkRequest(BaseModel):
+    url: HttpUrl
+
+
+class Link(BaseModel):
+    code: str
+    url: HttpUrl
+
+
+class Analytics(Link):
+    clicks: int
+
+
+def connect(path):
+    db = sqlite3.connect(path, timeout=5)
+    db.row_factory = sqlite3.Row
+    return db
+
+
+def initialize(path):
+    with closing(connect(path)) as db, db:
+        db.execute("BEGIN IMMEDIATE")
+        db.execute("""
+            CREATE TABLE IF NOT EXISTS links (
+                code TEXT PRIMARY KEY, url TEXT NOT NULL,
+                clicks INTEGER NOT NULL DEFAULT 0
+            )
+        """)
+
+
+def create_app(path: str | Path, clock=time.time):
+    initialize(path)
+    app = FastAPI(title="URL Shortener")
+
+    @app.post("/urls", status_code=201)
+    def create(request: LinkRequest) -> Link:
+        with closing(connect(path)) as db, db:
+            for _ in range(5):
+                code = secrets.token_urlsafe(6)
+                created = db.execute(
+                    "INSERT INTO links(code,url) VALUES (?,?) ON CONFLICT(code) DO NOTHING",
+                    (code, str(request.url)),
+                )
+                if created.rowcount:
+                    return Link(code=code, url=request.url)
+        raise HTTPException(503, "Unable to allocate a short code")
+
+    @app.get("/urls/{code}/analytics")
+    def analytics(code: str) -> Analytics:
+        with closing(connect(path)) as db:
+            row = db.execute("SELECT * FROM links WHERE code=?", (code,)).fetchone()
+        if row is None:
+            raise HTTPException(404, "Unknown short code")
+        return Analytics(**dict(row))
+
+    @app.get("/{code}", response_class=RedirectResponse)
+    def redirect(code: str):
+        with closing(connect(path)) as db, db:
+            db.execute("BEGIN IMMEDIATE")
+            row = db.execute("SELECT url FROM links WHERE code=?", (code,)).fetchone()
+            if row is None:
+                raise HTTPException(404, "Unknown short code")
+            db.execute("UPDATE links SET clicks=clicks+1 WHERE code=?", (code,))
+        return RedirectResponse(row["url"], status_code=302, headers={"Cache-Control": "no-store"})
+
+    return app
+
+
+def serve():
+    return create_app(os.environ.get("SHORTENER_DB", "links.sqlite"))
