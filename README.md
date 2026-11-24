@@ -1,120 +1,148 @@
-# Agentic URL shortener
+# Agentic URL Shortener
 
-A FastAPI URL shortener and a local engineering workflow. One model performs requirement analysis, architecture planning, test planning, and code generation. LangGraph and Python enforce dependencies, validation, and human change control.
+A FastAPI URL shortener and a local engineering workflow that turns a requirement into a tested Git commit for human review. The service creates short links, redirects visitors, counts successful redirects, and supports optional expiry. The workflow uses LangGraph to coordinate requirement analysis, design, implementation, and verification.
 
-## Setup
+## Installation
 
-Use Linux, Python 3.13, Git, uv, and access to a local Docker daemon. Build the validator once from the trusted repository. Docker needs network access for this setup step. Candidate execution uses the prebuilt local image and has networking disabled.
+Use Linux, Git, and [uv](https://docs.astral.sh/uv/). The commands below use Python 3.13. Run them from the repository root.
 
 ```sh
 uv sync --python 3.13
 uv run pytest -q
+```
+
+The workflow demos also require a running Docker daemon that your account can access. Build the validator image once. The build downloads dependencies. Candidate validation uses the local image with networking disabled.
+
+```sh
 docker build -f Dockerfile.validator -t shortener-validator:local .
+```
+
+## Run the URL shortener
+
+```sh
 uv run uvicorn shortener.app:serve --factory
 ```
 
+In another terminal, create a link that expires after five minutes.
+
 ```sh
-curl -s -X POST http://127.0.0.1:8000/urls \
+curl -s http://127.0.0.1:8000/urls \
   -H 'Content-Type: application/json' \
   -d '{"url":"https://example.com/","expires_in_seconds":300}'
-curl -i 'http://127.0.0.1:8000/<code>'
-curl -s 'http://127.0.0.1:8000/urls/<code>/analytics'
 ```
 
-API behavior is described in [API.md](API.md). Set `SHORTENER_DB` to choose the application's SQLite path.
+Copy the returned `code` into these commands. The first prints the redirect response. The second shows the link's click count and expiry.
 
-## Three scenarios
+```sh
+CODE=replace_with_returned_code
+curl -i "http://127.0.0.1:8000/$CODE"
+curl -s "http://127.0.0.1:8000/urls/$CODE/analytics"
+```
 
-Each start command creates an independent repository with a baseline `main` branch and a detached worktree. Use a new run ID to repeat a demo. Commands can be run from separate terminal sessions.
+The service uses `links.sqlite` by default. Set `SHORTENER_DB` to use a different path. See [API.md](API.md) for the request and response contract or open the interactive API docs at `http://127.0.0.1:8000/docs` while the service is running.
+
+## Run the engineering workflow
+
+The default provider uses deterministic scenario fixtures and requires no API key. Each run creates an isolated Git repository and worktree under `.runs/<run-id>`. Choose a fresh run ID when repeating a demo.
 
 ```sh
 scenarios/run.sh greenfield green-1
+```
+
+The CLI prints the candidate diff, revision, and commit SHA when validation passes. Read the generated summary and inspect the diff before approving.
+
+```sh
+uv run python -m workflow status green-1
+cat .runs/green-1/review.md
+```
+
+Approve the exact revision and SHA printed by the CLI. For example, if the gate displays revision 1, use the following command after replacing the SHA.
+
+```sh
+CANDIDATE_SHA=replace_with_displayed_commit_sha
+uv run python -m workflow resume green-1 approve --revision 1 --commit "$CANDIDATE_SHA"
+git -C .runs/green-1/repository log --oneline review
+```
+
+Approval promotes the candidate to the isolated repository's local `review` branch. To serve an approved candidate, run Uvicorn from that candidate's worktree using this project's Python environment.
+
+### Three scenarios
+
+| Scenario | Starting point and validation |
+| --- | --- |
+| Greenfield | Starts from an empty Git tree. Adds the API, tests, and documentation. Validates link creation, redirects, analytics, and expiry. |
+| Brownfield | Starts from an existing service. Adds optional expiry and a schema migration. Integration tests seed the legacy table and verify that links and click counts survive. |
+| Ambiguous | Starts from “Make the app more secure and faster.” Pauses for clarification, then replans around strict create payloads and SQLite WAL mode. Tests verify both behaviors. |
+
+```sh
 scenarios/run.sh brownfield brown-1
 scenarios/run.sh ambiguous unclear-1
 uv run python -m workflow resume unclear-1 clarify \
   --text 'Reject unknown create fields and enable SQLite WAL for concurrent readers.'
 ```
 
-- **Greenfield** begins with an empty Git tree. The model adds the API, tests, and API documentation.
-- **Brownfield** begins with an existing create, redirect, and analytics API. The model adds optional expiry and a schema migration. Trusted integration tests seed the legacy table and verify that its URLs and click counts survive.
-- **Ambiguous** begins with an existing shortener. It pauses before design and stores the question in SQLite. Clarification replaces the plan with two concrete requirements, strict create payloads and WAL mode. The acceptance tests verify the two behaviors. No speedup is claimed.
-
-The CLI shows the proposed diff, revision, commit, and path to the generated engineering summary. Inspect the summary and diff before approving. Substitute the exact revision and SHA printed for each run.
+Use the same review procedure for each run. The ambiguous demo reaches approval at revision 2 after clarification. At a review gate, you can also reject a candidate or replace its requirement.
 
 ```sh
-uv run python -m workflow status green-1
-cat .runs/green-1/review.md
-uv run python -m workflow resume green-1 approve --revision 1 --commit <SHA>
-git -C .runs/green-1/repository log --oneline --all
 uv run python -m workflow resume brown-1 reject
-uv run python -m workflow status unclear-1
-uv run python -m workflow resume unclear-1 approve --revision 2 --commit <SHA>
+uv run python -m workflow resume unclear-1 revise --text 'Provide a revised requirement here'
 uv run python -m workflow events
 uv run python -m workflow metrics
 ```
 
-To replace a requirement before approval, use `resume RUN revise --text 'new requirement'`. This discards unapproved changes, increments the revision, and runs Analyze and both Design branches again. The mock uses fixed scenario implementations. Use the live provider for arbitrary requirements. To resume after an interrupted automatic stage, use `resume RUN` without a decision.
+The mock provider supports the built-in scenarios. Use the live provider to try arbitrary requirements within the project's allowed file scope. If an automatic stage is interrupted, use `uv run python -m workflow resume RUN_ID` to continue from its checkpoint.
 
-An approved change moves to the run repository's local `review` branch. The run's `main` stays at the initial baseline. To run an approved greenfield or brownfield candidate, use the main project's Python environment with the candidate as the working directory and run `python -m uvicorn shortener.app:serve --factory`.
+### Live model configuration
 
-## Live provider
-
-Configure one OpenAI-compatible Chat Completions endpoint that supports JSON mode.
+Copy the template and edit `.env` with values for an authorized OpenAI-compatible endpoint that supports JSON mode.
 
 ```sh
-export WORKFLOW_MODEL='<model>'
-export WORKFLOW_API_KEY='<key>'
-# Optional. The default is https://api.openai.com/v1.
-export WORKFLOW_API_BASE='<compatible endpoint>/v1'
+cp -n .env.example .env
+```
+
+```dotenv
+WORKFLOW_API_BASE=https://api.openai.com/v1
+WORKFLOW_MODEL=your_model_id
+WORKFLOW_API_KEY=your_api_key
+```
+
+Shell variables override `.env` values. The file is Git-ignored. Provider credentials stay outside the validator. The live provider sends requirements and relevant repository files to the configured endpoint.
+
+```sh
 uv run python -m workflow start live-1 greenfield --provider live
 ```
 
-Only send repository content and requirements to an endpoint authorized to receive them. Provider credentials stay outside the validator. The validator never fetches packages at runtime. Set `WORKFLOW_IMAGE` to select a trusted, locally built image.
-
-## Architecture and controls
+## How it works
 
 ```mermaid
 flowchart LR
-    A[Analyze] -->|clear| D[Architecture]
-    A -->|clear| T[Test plan]
-    A -->|ambiguous| C[Clarify]
+    A[Analyze requirement] -->|clear| D[Design architecture]
+    A -->|clear| T[Plan tests]
+    A -->|ambiguous| C[Request clarification]
+    A -->|analysis failed| S[Restore baseline and stop]
     C --> A
-    D --> J[Join]
+    D --> J[Join both plans]
     T --> J
-    J --> I[Implement]
-    I --> V[Validate]
+    J -->|plans available| I[Generate code, tests, and API docs]
+    J -->|planning failed| S
+    I --> V[Validate candidate]
     V -->|repair budget remains| I
-    V -->|passed| H[Human review]
-    V -->|blocked or exhausted| S[Rollback and safe stop]
-    H -->|approve reviewed SHA| P[Promote to review]
+    V -->|passed| H[Review diff and engineering summary]
+    V -->|blocked or exhausted| S
+    H -->|approve revision and SHA| P[Promote to local review branch]
     H -->|reject| S
     H -->|revise| A
 ```
 
-- **State.** LangGraph checkpoints preserve the current revision, tasks, branch outputs, candidate, and human interrupt. SQLite events record decisions, stage outputs, failures, retries, rollback, and promotion. This is a local, inspectable audit trail.
-- **Entry and exit gates.** Analysis checks that task IDs are unique and that dependencies refer to earlier tasks. The fan-in waits for both design outputs. Validation resets to the proposed commit and checks the candidate before a human can approve. Approval binds the run, revision, and SHA to the decision.
-- **Execution.** The model returns typed file edits. Python enforces a three-path allowlist, rejects symlinks and certain risky Python constructs, and uses fixed Git and Docker arguments. The container runs a fixed pytest command with a non-root identity, read-only source and root filesystem, no network, dropped capabilities, and resource limits. Candidate code never receives the workflow SQLite database, Git metadata, or provider credentials.
-- **Failure handling.** Provider requests get at most two attempts per node invocation. Validation can request up to two repair rounds. Unavailable validation stops the run immediately. Rejection, revision and safe-stop reset the worktree to the known baseline. Pending candidate SHAs remain in checkpoints and events. Promotion can be replayed idempotently if the review ref already points to the expected commit.
-- **Metrics.** Success rate is approvals divided by terminal runs. Retry and rollback counts include in-progress work. MTTR is the mean time between the first recorded failure in a revision and successful validation of that revision. Unrecovered revisions are counted separately. End-to-end time is measured from creation to terminal outcome and includes human wait time.
+- [Workflow graph](workflow/graph.py) validates task dependencies, runs architecture and test planning in parallel, and waits for both before implementation. SQLite checkpoints carry the requirement, revision, plans, candidate SHA, and approval state across CLI invocations.
+- [Model provider](workflow/provider.py) returns structured analysis, plans, and typed file edits. Clarification and revised requirements create a new revision and rerun analysis and design. Failed validation feeds diagnostics back into implementation for up to two repair rounds.
+- [Workspace](workflow/workspace.py) and [validator](workflow/validation.py) restrict edits to the service, tests, and API docs. Validation runs in Docker with a non-root identity, read-only source, disabled networking, and resource limits. Set `WORKFLOW_IMAGE` to select a trusted local validator image.
+- The [audit module](workflow/audit.py) records stage outputs, failures, retries, rollbacks, and approval decisions. Success rate measures approvals among terminal runs. Recovery time measures the interval from a revision's first recorded failure to its successful validation. End-to-end latency includes human wait time.
 
-## Requirements traceability
+## Testing and limitations
 
-| Requirement | Implementation | Evidence |
-|---|---|---|
-| Create, redirect, analytics, expiry, and input validation | `shortener/app.py`, `API.md` | `tests/test_shortener.py` |
-| Ambiguity, decomposition, and brownfield reasoning | Analyze node, typed analysis, baseline source snapshot | Ambiguous and brownfield demos, `test_ambiguity_and_replanning` |
-| Parallel design and synchronization | Architecture and test-plan branches with a multi-source edge to Join | `test_parallel_join_and_promotion_after_restart` uses a two-party barrier |
-| Durable state, approval, and rejection | SQLite saver, CLI interrupts, SHA-bound review ref | Approval after reopening SQLite, stale SHA and rejection tests |
-| Retry, fallback, rollback, and safe-stop | Bounded model and repair attempts, baseline restore | Repair, exhaustion, and missing-runner tests |
-| Change control and sandbox | Path restrictions, AST checks, fixed Docker runner, isolated Git | Policy tests and Docker-backed scenario validation |
-| Dynamic re-planning | Revision increment, baseline reset, fresh analysis and design | `test_ambiguity_and_replanning` |
-| Observability and final engineering summary | SQLite events and metrics, per-run `review.md` | Events and metrics commands, review summary at approval |
-| Setup, tests, three scenarios, and trade-offs | README, fixtures, scenario entry point | Setup and demo commands above |
+Run `uv run pytest -q` for the repository suite. It covers HTTP behavior, legacy migration, workflow synchronization, restart and approval, rejection, bounded repair, safe-stop, replanning, and provider configuration.
 
-## Limitations and verification
+The latest local verification passed **17 repository tests**. Docker validation passed **10 greenfield**, **10 brownfield**, and **9 ambiguous** tests. All three deterministic demos reached approval and promoted to their isolated review branches. A successful live-provider run remains to be verified.
 
-This is a single-user local prototype for small Python projects. It keeps Git workspaces on disk and uses OS-account access controls. The audit log is neither tamper-evident nor independently authenticated. Recovery covers durable graph checkpoints and idempotent promotion. A crash during initial repository creation may require a new run ID. The mock provider only demonstrates known scenarios.
-
-The AST policy is heuristic, and candidates may still contain bugs or attempt to manipulate in-process test results. Review both code and evidence before accepting a change. Docker uses the host kernel, so deploy the validator on a dedicated runner before processing untrusted submissions outside this assignment. The shortener intentionally redirects to caller-specified destinations. It has no authentication, rate limiting, distributed analytics, or load benchmark.
-
-The unit and integration suite uses a deterministic provider and simulated validation results to test orchestration. The scenario CLI always uses Docker. At implementation time, Python syntax checks and local Git/SQLite smoke checks ran. PyPI dependency resolution was unavailable, and the current account could not access the Docker daemon. Full pytest, Docker-backed scenarios, and live-provider execution require a configured environment.
+The prototype uses a single-user local workspace, SQLite checkpoints, and an editable audit log. The workflow replans on human clarification and requirement revision. Changes to an upstream design or test-plan artifact do not automatically invalidate downstream state. The validator's static checks are heuristic, and candidate code runs in the same pytest process as acceptance tests. The shortener currently has aggregate click counts and relies on SQLite for storage. Authentication, rate limiting, and load benchmarks are outside the current implementation.

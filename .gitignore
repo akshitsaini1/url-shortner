@@ -4,3 +4,4 @@ __pycache__/
 *.egg-info/
 *.sqlite*
 .runs/
+.env

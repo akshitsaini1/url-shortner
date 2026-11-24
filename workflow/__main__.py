@@ -97,6 +97,9 @@ def main():
     if len(getattr(args, "text", "") or "") > 4000 or len(getattr(args, "requirement", "") or "") > 4000:
         parser.error("Requirement and clarification text are limited to 4000 characters")
     run_dir = state_dir / args.run
+    live_provider = None
+    if args.operation == "start" and args.provider == "live":
+        live_provider = LiveProvider(ROOT / ".env")
     if args.operation == "start":
         try:
             run_dir.mkdir(mode=0o700)
@@ -116,7 +119,7 @@ def main():
         provider_name = metadata.read_text().strip()
         provider = MockProvider(ROOT)
         if provider_name == "live" and args.operation != "status":
-            provider = LiveProvider()
+            provider = live_provider or LiveProvider(ROOT / ".env")
         graph = build_graph(provider, workspace, audit, docker_validate, saver)
         config = {"configurable": {"thread_id": args.run}, "recursion_limit": 100}
         if args.operation == "start":

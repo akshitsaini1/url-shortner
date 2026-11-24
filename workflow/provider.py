@@ -42,11 +42,33 @@ class Implementation(Output):
     edits: list[Edit] = Field(min_length=1, max_length=3)
 
 
+def read_model_settings(env_file):
+    """Read the documented KEY=value format without executing shell syntax."""
+    keys = {"WORKFLOW_MODEL", "WORKFLOW_API_KEY", "WORKFLOW_API_BASE"}
+    settings = {}
+    if env_file.is_file():
+        for line in env_file.read_text(encoding="utf-8").splitlines():
+            key, separator, value = line.strip().partition("=")
+            key = key.strip()
+            if not separator or key not in keys:
+                continue
+            value = value.strip()
+            if len(value) >= 2 and value[0] in ("'", '"') and value[0] == value[-1]:
+                value = value[1:-1]
+            settings[key] = value
+    settings.update({key: os.environ[key] for key in keys if key in os.environ})
+    return settings
+
+
 class LiveProvider:
-    def __init__(self):
-        self.model = os.environ["WORKFLOW_MODEL"]
-        self.key = os.environ["WORKFLOW_API_KEY"]
-        self.endpoint = os.environ.get("WORKFLOW_API_BASE", "https://api.openai.com/v1")
+    def __init__(self, env_file):
+        settings = read_model_settings(env_file)
+        self.model = settings.get("WORKFLOW_MODEL")
+        self.key = settings.get("WORKFLOW_API_KEY")
+        self.endpoint = settings.get("WORKFLOW_API_BASE") or "https://api.openai.com/v1"
+        for name, value in (("WORKFLOW_MODEL", self.model), ("WORKFLOW_API_KEY", self.key)):
+            if not value:
+                raise ValueError(f"Set {name} in .env or the shell environment")
 
     def generate(self, role, schema, context):
         rules = {
